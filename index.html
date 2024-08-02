@@ -1,23 +1,123 @@
+from flask import Flask, request, jsonify, send_file, render_template_string
+import zipfile
+import os
+import shutil
+import json
+import re
+
+app = Flask(__name__)
+
+UPLOAD_FOLDER = 'uploads'
+EXTRACT_FOLDER = 'extracted'
+OUTPUT_FOLDER = 'output'
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(EXTRACT_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+HTML_PAGE = """
 <!DOCTYPE html>
-<html lang="ar">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لعبة التوقع</title>
-    <link rel="stylesheet" href="styles.css">
+    <title>Upload IPA</title>
 </head>
 <body>
-    <h1>لعبة التوقع</h1>
-    <h2>إهداء لروم يلدز من شايبكم</h2>
-    <div class="game-container">
-        <form id="guessForm">
-            <input type="text" id="answer" placeholder="أدخل إجابتك" required>
-            <button type="submit">إرسال</button>
-        </form>
-        <p id="prediction"></p>
-        <p id="history"></p>
-        <p id="error-message" class="error"></p>
-    </div>
-    <script src="scripts.js"></script>
+    <h1>Upload IPA File</h1>
+    <form id="upload-form" enctype="multipart/form-data" method="post" action="/upload">
+        <input type="file" id="file-input" name="ipa-file" accept=".ipa" required>
+        <button type="submit">Upload</button>
+    </form>
+    <div id="result"></div>
 </body>
 </html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_PAGE)
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'ipa-file' not in request.files:
+        return jsonify({'message': 'No file part'}), 400
+
+    file = request.files['ipa-file']
+    if file.filename == '':
+        return jsonify({'message': 'No selected file'}), 400
+
+    if file and file.filename.endswith('.ipa'):
+        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(file_path)
+
+        extracted_path = os.path.join(EXTRACT_FOLDER, os.path.splitext(file.filename)[0])
+        output_ipa = os.path.join(OUTPUT_FOLDER, os.path.splitext(file.filename)[0] + '_modified.ipa')
+
+        unzip_ipa(file_path, extracted_path)
+        modify_json_files(extracted_path)
+        rezip_ipa(extracted_path, output_ipa)
+
+        # يجب توقيع التطبيق باستخدام شهادة مطور صالحة هنا
+        # يمكنك استخدام أداة مثل `codesign` أو `ldid` لتوقيع ملف .ipa المعدل
+
+        return send_file(output_ipa, as_attachment=True)
+
+    return jsonify({'message': 'Invalid file type'}), 400
+
+def unzip_ipa(file_path, extract_to):
+    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+
+def rezip_ipa(source_dir, output_file):
+    shutil.make_archive(output_file, 'zip', source_dir)
+    os.rename(output_file + '.zip', output_file)
+
+def modify_json_files(directory):
+    search_patterns = [re.compile(r'\b(JailBreak|jailbreak|Jailbreak|root|Rooted)\b')]
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.json'):
+                file_path = os.path.join(root, file)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                modified = False
+                if isinstance(data, dict):
+                    modified = modify_dict(data, search_patterns)
+                elif isinstance(data, list):
+                    modified = modify_list(data, search_patterns)
+
+                if modified:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def modify_dict(data, search_patterns):
+    modified = False
+    for key, value in data.items():
+        if isinstance(value, dict):
+            if modify_dict(value, search_patterns):
+                modified = True
+        elif isinstance(value, list):
+            if modify_list(value, search_patterns):
+                modified = True
+        elif isinstance(value, str):
+            for pattern in search_patterns:
+                if pattern.match(key) and value.lower() == 'true':
+                    data[key] = 'FALSE'
+                    modified = True
+    return modified
+
+def modify_list(data, search_patterns):
+    modified = False
+    for item in data:
+        if isinstance(item, dict):
+            if modify_dict(item, search_patterns):
+                modified = True
+        elif isinstance(item, list):
+            if modify_list(item, search_patterns):
+                modified = True
+    return modified
+
+if __name__ == '__main__':
+    app.run(debug=True)
